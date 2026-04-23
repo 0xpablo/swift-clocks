@@ -1,6 +1,10 @@
 #if (canImport(RegexBuilder) || !os(macOS) && !targetEnvironment(macCatalyst))
   import ConcurrencyExtras
-  import Foundation
+  #if canImport(FoundationEssentials)
+    import FoundationEssentials
+  #else
+    import Foundation
+  #endif
   import IssueReporting
 
   /// A clock whose time can be controlled in a deterministic manner.
@@ -86,9 +90,9 @@
     }
 
     public var minimumResolution: Duration = .zero
-    public private(set) var now: Instant
+    private var _now: Instant
 
-    private let lock = NSRecursiveLock()
+    private let lock = RecursiveLock()
     private var suspensions:
       [(
         id: UUID,
@@ -97,15 +101,21 @@
       )] = []
 
     public init(now: Instant = .init()) {
-      self.now = now
+      self._now = now
+    }
+
+    public var now: Instant {
+      self.lock.withLock {
+        self._now
+      }
     }
 
     public func sleep(until deadline: Instant, tolerance: Duration? = nil) async throws {
       try Task.checkCancellation()
       let id = UUID()
       do {
-        let stream: AsyncThrowingStream<Never, Error>? = self.lock.sync {
-          guard deadline >= self.now
+        let stream: AsyncThrowingStream<Never, Error>? = self.lock.withLock {
+          guard deadline >= self._now
           else {
             return nil
           }
@@ -118,7 +128,7 @@
         for try await _ in stream {}
         try Task.checkCancellation()
       } catch is CancellationError {
-        self.lock.sync { self.suspensions.removeAll(where: { $0.id == id }) }
+        self.lock.withLock { self.suspensions.removeAll(where: { $0.id == id }) }
         throw CancellationError()
       } catch {
         throw error
@@ -151,7 +161,7 @@
     /// ```
     public func checkSuspension() async throws {
       await Task.megaYield()
-      guard self.lock.sync(operation: { self.suspensions.isEmpty })
+      guard self.lock.withLock({ self.suspensions.isEmpty })
       else { throw SuspensionError() }
     }
 
@@ -159,14 +169,14 @@
     ///
     /// See the documentation for ``TestClock`` to see how to use this method.
     public func advance(by duration: Duration = .zero) async {
-      await self.advance(to: self.lock.sync(operation: { self.now.advanced(by: duration) }))
+      await self.advance(to: self.lock.withLock { self._now.advanced(by: duration) })
     }
 
     /// Advances the test clock's internal time to the deadline.
     ///
     /// See the documentation for ``TestClock`` to see how to use this method.
     public func advance(to deadline: Instant) async {
-      while self.lock.sync(operation: { self.now <= deadline }) {
+      while self.lock.withLock({ self._now <= deadline }) {
         await Task.megaYield()
         let `return` = {
           self.lock.lock()
@@ -176,12 +186,12 @@
             let next = self.suspensions.first,
             deadline >= next.deadline
           else {
-            self.now = deadline
+            self._now = deadline
             self.lock.unlock()
             return true
           }
 
-          self.now = next.deadline
+          self._now = next.deadline
           self.suspensions.removeFirst()
           self.lock.unlock()
           next.continuation.finish()
@@ -241,9 +251,9 @@
           }
           group.addTask {
             await Task.megaYield()
-            while let deadline = self.lock.sync(operation: { self.suspensions.first?.deadline }) {
+            while let deadline = self.lock.withLock({ self.suspensions.first?.deadline }) {
               try Task.checkCancellation()
-              await self.advance(by: self.lock.sync(operation: { self.now.duration(to: deadline) }))
+              await self.advance(by: self.lock.withLock({ self._now.duration(to: deadline) }))
             }
           }
           try await group.next()

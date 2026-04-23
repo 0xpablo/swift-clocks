@@ -1,6 +1,5 @@
 #if (canImport(RegexBuilder) || !os(macOS) && !targetEnvironment(macCatalyst))
   import ConcurrencyExtras
-  import Foundation
 
   /// A clock that does not suspend when sleeping.
   ///
@@ -133,17 +132,24 @@
       }
     }
 
-    public private(set) var now: Instant
+    private let nowStorage: LockStorage<Instant>
     public private(set) var minimumResolution: Duration = .zero
-    private let lock = NSLock()
 
     public init(now: Instant = .init()) {
-      self.now = now
+      self.nowStorage = LockStorage<Instant>.create(value: now)
+    }
+
+    public var now: Instant {
+      self.nowStorage.withLockedValue {
+        $0
+      }
     }
 
     public func sleep(until deadline: Instant, tolerance: Duration?) async throws {
       try Task.checkCancellation()
-      self.lock.sync { self.now = deadline }
+      self.nowStorage.withLockedValue { now in
+        now = deadline
+      }
       await Task.megaYield()
     }
   }
